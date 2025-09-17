@@ -1,0 +1,39 @@
+name: 'Deploy Sunbeam Single Node'
+description: 'Deploys a single-node Sunbeam OpenStack instance.'
+inputs:
+  openstack-channel:
+    description: OpenStack snap channel
+    default: 2024.1/stable
+  manifest-file:
+    description: Manifest file path
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Install snaps and dependencies
+      shell: bash
+      run: |
+        sudo snap install jq
+        sudo snap install --channel 3.6 juju
+        sudo snap install openstack --channel ${{ inputs.openstack-channel }}
+
+    - name: Bootstrap sunbeam and configure
+      shell: bash
+      run: |
+        set -x
+        export COLUMNS=256
+
+        sunbeam prepare-node-script --bootstrap | bash -x
+        sg snap_daemon "sunbeam cluster bootstrap --manifest ${{ inputs.manifest-file }} --accept-defaults --topology single"
+        sg snap_daemon "sunbeam configure --accept-defaults"
+        sg snap_daemon "sunbeam cloud-config --update"
+        sg snap_daemon "sunbeam cloud-config --update --admin"
+
+    - name: Enable features
+      shell: bash
+      run: |
+        # TODO: make it more generic by accepting features as input
+        sg snap_daemon "sunbeam enable loadbalancer"
+        sg snap_daemon "sunbeam enable vault --dev-mode"
+        sleep 300 # wait for vault application status to be active (based on update-status)
+        sg snap_daemon "sunbeam enable secrets"

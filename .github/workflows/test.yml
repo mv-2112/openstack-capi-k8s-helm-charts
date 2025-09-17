@@ -21,3 +21,97 @@ jobs:
 
       - name: Package the chart
         run: helm package -u charts/openstack-ck8s-cluster
+
+  functional-test:
+    needs: lint
+    name: Functional test
+    runs-on: [self-hosted, xlarge, noble, x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: setup the machine
+        run: |
+          set -x
+          export COLUMNS=256
+
+          # Check docker, containerd and remove them if exists
+          sudo apt remove --purge docker.io containerd runc -y
+          sudo rm -rf /run/containerd
+
+          # Allow lxd controller to reach to k8s controller on loadbalancer ip
+          # sudo nft insert rule ip filter FORWARD tcp dport 17070 accept
+          # sudo nft insert rule ip filter FORWARD tcp sport 17070 accept
+          # With above rules, got the following error:
+          # api.charmhub.io on 10.152.183.182:53: server misbehaving
+          # Accept all packets filtered for forward
+          sudo nft chain ip filter FORWARD '{policy accept;}'
+
+          sudo snap remove --purge lxd
+
+      - name: deploy sunbeam
+        uses: ./.github/actions/deploy-sunbeam-single-node
+        with:
+          openstack-channel: 2024.1/stable
+          manifest-file: .github/assets/manifests/ci.yml
+
+      - name: Setup CAPI management cluster
+        run: |
+          # TODO: Make versions part of input
+          CLUSTERCTL_VERSION=v1.10.5
+          CLUSTERAPI_VERSION=v1.10.5
+          CK8S_BOOTSTRAP_VERSION=v0.4.2
+          CK8S_CONTROLPLANE_VERSION=v0.4.2
+          INFRA_OPENSTACK_VERSION=v0.12.4
+          ADDON_HELM_VERSION=v0.3.2
+
+          # Get kubeconfig
+          sudo k8s config > kubeconfig
+
+          # Install clusterctl
+          curl -L https://github.com/kubernetes-sigs/cluster-api/releases/download/${CLUSTERCTL_VERSION}/clusterctl-linux-amd64 -o clusterctl
+          sudo install -o root -g root -m 0755 clusterctl /usr/local/bin/clusterctl
+
+          # Install ORC CRD
+          curl -L https://github.com/k-orc/openstack-resource-controller/releases/download/v1.0.0/install.yaml -o crd_orc.yaml
+          sudo k8s kubectl apply -f crd_orc.yaml
+
+          # Deploy CAPI/CAPO
+          clusterctl init --core cluster-api:${CLUSTERAPI_VERSION} --bootstrap canonical-kubernetes:${CK8S_BOOTSTRAP_VERSION} --control-plane canonical-kubernetes:${CK8S_CONTROLPLANE_VERSION} --infrastructure openstack:${INFRA_OPENSTACK_VERSION} --addon helm:${ADDON_HELM_VERSION} --wait-providers --wait-provider-timeout 300 --kubeconfig kubeconfig
+
+      - name: Setup helm repo locally
+        run: |
+          echo $pwd
+          mkdir -p charts/release
+          sudo k8s helm lint charts/openstack-ck8s-cluster
+          sudo k8s helm package charts/openstack-ck8s-cluster -d charts/release/ -u
+          sudo k8s helm repo index charts/release/
+          cd charts/release
+          nohup python3 -m http.server 9999 &
+
+      - name: Run functional tests
+        run: |
+          sudo snap install yq
+          chart_version=`yq .version charts/openstack-ck8s-cluster/Chart.yaml`
+
+          sudo snap install astral-uv --channel latest/stable --classic
+          uv venv
+          source .venv/bin/activate
+          uv pip install pytest secret pyyaml
+          uv run python -m pytest -s -vv tests/functional/ --basetemp=$HOME/functionaltesttmp --helm-repo-path=http://127.0.0.1:9999 --openstack-cluster-chart-version=${chart_version}
+
+      - name: Collect logs
+        if: always()
+        run: |
+          ./.github/scripts/collect_logs.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capi_logs
+          path: logs
+          retention-days: 30
+
+      - name: Setup tmate session
+        if: ${{ failure() && runner.debug }}
+        uses: canonical/action-tmate@main

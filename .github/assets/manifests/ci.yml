@@ -1,0 +1,12 @@
+core:
+  config:
+    database: single
+  software:
+    juju:
+      bootstrap_args:
+        - --bootstrap-constraints
+        - root-disk=5G
+    charms:
+      mysql-k8s:
+        storage:
+          database: 2G
