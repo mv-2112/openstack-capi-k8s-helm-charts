@@ -235,7 +235,7 @@ cluster-autoscaler:
     readOnlyRootFilesystem: true
   extraVolumeMounts:
     - name: kubeconfig
-      readonly: true
+      readOnly: true
       mountPath: /etc/kubernetes
   extraVolumeClusterNamespaceSecrets:
     kubeconfig:
